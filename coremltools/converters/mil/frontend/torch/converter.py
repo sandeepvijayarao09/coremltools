@@ -777,6 +777,21 @@ class TorchConverter:
         _adjust_default_input_to_fp16_helper(self.inputs)
         _adjust_default_input_to_fp16_helper(self.states)
 
+    def _input_passthrough_scopes(self, var: Var) -> List[ScopeInfo]:
+        """
+        Placeholder scopes for the identity op that gives a graph input returned
+        as an output its own Var.
+        """
+        if self.context.frontend == TorchFrontend.TORCHSCRIPT:
+            return [
+                ScopeInfo(source=ScopeSource.TORCHSCRIPT_MODULE_TYPE, data="placeholder"),
+                ScopeInfo(source=ScopeSource.TORCHSCRIPT_MODULE_NAME, data=var.name),
+            ]
+        return [
+            ScopeInfo(source=ScopeSource.EXIR_STACK_TRACE, data=var.name),
+            ScopeInfo(source=ScopeSource.EXIR_DEBUG_HANDLE, data=[None]),
+        ]
+
     def _adjust_default_output_to_fp16(self, graph_outputs):
         """
         An utility function that sets the default outputs with inferred type fp32 to fp16.
@@ -1432,9 +1447,17 @@ class TorchConverter:
                         f"Number of outputs provided, {len(self.outputs)}, do not match the number of outputs detected in the model, {len(graph_outputs)}."
                     )
             if self.output_names:
+                input_vars = {id(var) for var in ssa_func.inputs.values()}
                 for index, var in enumerate(graph_outputs):
                     if self.output_names[index] is not None:
                         output_rename = self.output_names[index]
+                        if id(var) in input_vars and var.name != output_rename:
+                            # The output is a graph input passed straight through
+                            # (e.g. `return x`). Renaming it would rename the input
+                            # too, so give the output its own Var.
+                            with mb.scope(*self._input_passthrough_scopes(var)):
+                                var = mb.identity(x=var, name=output_rename)
+                            graph_outputs[index] = var
                         var.name = output_rename
 
             ssa_func.set_outputs(graph_outputs)

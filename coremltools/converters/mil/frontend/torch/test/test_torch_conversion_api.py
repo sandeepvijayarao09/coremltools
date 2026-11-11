@@ -2224,6 +2224,66 @@ class TestInputOutputConversionAPI:
         assert_output_dtype(mlmodel, expected_type_str="fp32", expected_name="out2", index=1)
         verify_prediction(mlmodel)
 
+    @pytest.mark.parametrize(
+        "backend, return_computed_output",
+        itertools.product(backends, [False, True]),
+    )
+    def test_input_returned_as_output_with_custom_name(self, backend, return_computed_output):
+        # https://github.com/apple/coremltools/issues/1742
+        class Model(torch.nn.Module):
+            def forward(self, x):
+                return (x, x + 1) if return_computed_output else x
+
+        x = torch.rand(1, 2)
+        expected = Model()(x)
+        expected = [t.numpy() for t in expected] if return_computed_output else [expected.numpy()]
+        output_names = ["out_a", "out_b"][: len(expected)]
+        mlmodel = ct.convert(
+            torch.jit.trace(Model().eval(), x),
+            inputs=[ct.TensorType(name="x", shape=x.shape)],
+            outputs=[ct.TensorType(name=name) for name in output_names],
+            convert_to=backend[0],
+            compute_precision=ct.precision.FLOAT32 if backend[0] == "mlprogram" else None,
+            compute_units=ct.ComputeUnit.CPU_ONLY,
+        )
+
+        assert [input.name for input in mlmodel.get_spec().description.input] == ["x"]
+        assert [output.name for output in mlmodel.get_spec().description.output] == output_names
+
+        if ct.utils._is_macos():
+            prediction = mlmodel.predict({"x": x.numpy()})
+            for name, value in zip(output_names, expected):
+                np.testing.assert_allclose(prediction[name], value)
+
+    def test_image_input_returned_as_image_output(self):
+        # https://github.com/apple/coremltools/issues/1742
+        class Model(torch.nn.Module):
+            def forward(self, x):
+                return x
+
+        x = torch.rand(1, 3, 4, 5) * 255
+        mlmodel = ct.convert(
+            torch.jit.trace(Model().eval(), x),
+            inputs=[
+                ct.ImageType(name="input_image", shape=x.shape, color_layout=ct.colorlayout.RGB)
+            ],
+            outputs=[ct.ImageType(name="output_image", color_layout=ct.colorlayout.RGB)],
+            minimum_deployment_target=ct.target.macOS13,
+        )
+        assert_spec_input_image_type(
+            mlmodel._spec, expected_feature_type=proto.FeatureTypes_pb2.ImageFeatureType.RGB
+        )
+        assert_spec_output_image_type(
+            mlmodel._spec, expected_feature_type=proto.FeatureTypes_pb2.ImageFeatureType.RGB
+        )
+        assert mlmodel.get_spec().description.input[0].name == "input_image"
+        assert mlmodel.get_spec().description.output[0].name == "output_image"
+
+        if ct.utils._is_macos():
+            image = Image.fromarray(np.random.randint(0, 256, size=(4, 5, 3), dtype=np.uint8))
+            output = mlmodel.predict({"input_image": image})["output_image"]
+            np.testing.assert_array_equal(np.array(output.convert("RGB")), np.array(image))
+
     def test_color_input(self, rank4_input_model, rank3_input_model):
         mlmodel = ct.convert(
             rank4_input_model,
