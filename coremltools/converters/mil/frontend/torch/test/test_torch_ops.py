@@ -8479,6 +8479,39 @@ class TestTo(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
+        "compute_unit, backend, device",
+        itertools.product(compute_units, backends, ["of_tensor", "string"]),
+    )
+    def test_to_device_keeps_dtype(self, compute_unit, backend, device):
+        # In TorchScript, `t.to(device)` is `aten::to(t, device, None, non_blocking, copy)`,
+        # which has the same number of inputs as `aten::to(t, dtype, non_blocking, copy, memory_format)`.
+        # Only moving to a device must not change the dtype.
+        class ToDeviceOfTensor(torch.nn.Module):
+            def forward(self, x, indices):
+                return torch.index_select(x, 0, indices.to(x.device))
+
+        class ToDeviceString(torch.nn.Module):
+            def forward(self, x, indices):
+                return torch.index_select(x, 0, indices.to("cpu"))
+
+        model = ToDeviceOfTensor() if device == "of_tensor" else ToDeviceString()
+        inputs = [
+            TensorType(name="x", shape=(5, 3), dtype=np.float32),
+            TensorType(name="indices", shape=(4,), dtype=np.int32),
+        ]
+        _, mlmodel, _, _, _, _ = self.run_compare_torch(
+            inputs,
+            model,
+            rand_range=(0, 5),
+            use_scripting=True,
+            backend=backend,
+            compute_unit=compute_unit,
+        )
+        gather_ops = mlmodel._mil_program.find_ops(op_type="gather")
+        assert len(gather_ops) == 1
+        assert types.is_int(gather_ops[0].indices.dtype)
+
+    @pytest.mark.parametrize(
         "compute_unit, backend, frontend",
         itertools.product(compute_units, backends, frontends),
     )

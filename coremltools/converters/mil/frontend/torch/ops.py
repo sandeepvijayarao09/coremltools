@@ -6781,13 +6781,17 @@ def to(context, node):
         # There are a lot of variants of `to` op.
         # - When len(inputs) is 7 or 8, we only care about the first two params (input and dtype).
         # - When len(inputs) == 6, the parameter is (input, _, dtype, non_blocking, copy, memory_format)
-        # - When len(inputs) == 5, the parameter is (input, dtype, non_blocking, copy, memory_format)
+        # - When len(inputs) == 5, the parameter is either (input, dtype, non_blocking, copy, memory_format)
+        #   or, for the `to.prim_Device` variant, (input, device, dtype, non_blocking, copy).
+        #   The two are told apart by the third input: `non_blocking` is a bool, `dtype` is not.
         # - When len(inputs) == 4, the parameter is (input, dtype, non_blocking, copy)
         # - When len(inputs) == 3, the parameter is (input, non_blocking, copy)
         # We only use `input` and `dtype`, and `non_blocking` and `copy` are unused.
         if context.frontend == TorchFrontend.TORCHSCRIPT:
             dtype: Optional[Var]
-            if nargs in (4, 5, 7, 8):
+            if nargs == 5 and (inputs[2] is None or not types.is_bool(inputs[2].dtype)):
+                dtype = inputs[2]
+            elif nargs in (4, 5, 7, 8):
                 dtype = inputs[1]
             elif nargs == 6:
                 dtype = inputs[2]
